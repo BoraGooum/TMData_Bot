@@ -44,6 +44,7 @@ async function sendMessage(chatId, text) {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
   });
 }
 
