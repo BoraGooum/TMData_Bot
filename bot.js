@@ -2,6 +2,12 @@
 // Bot Telegram "TMDB" — exécuté par GitHub Actions, déclenché par Cron-Job.org
 // Aucune dépendance externe : utilise fetch natif (Node 18+)
 
+import fs from "fs";
+import { execSync } from "child_process";
+
+const HISTORIQUE_PATH = "historique.csv";
+const HISTORIQUE_HEADER = "Titre,Type,Lien TMDB (FR),Date et heure";
+
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TMDB_KEY = process.env.TMDB_API_KEY;
 
@@ -94,6 +100,48 @@ function formatDurationTv(seasons, episodes) {
   return `${s}/${e}`;
 }
 
+function csvEscape(value) {
+  const str = String(value ?? "");
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function formatNowFr() {
+  const parts = new Intl.DateTimeFormat("fr-FR", {
+    timeZone: "Europe/Paris",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")}`;
+}
+
+function appendHistorique(title, typeLabel, tmdbUrl) {
+  if (!fs.existsSync(HISTORIQUE_PATH)) {
+    fs.writeFileSync(HISTORIQUE_PATH, HISTORIQUE_HEADER + "\n");
+  }
+  const row = [csvEscape(title), csvEscape(typeLabel), csvEscape(tmdbUrl), csvEscape(formatNowFr())].join(",");
+  fs.appendFileSync(HISTORIQUE_PATH, row + "\n");
+}
+
+function commitHistorique() {
+  try {
+    execSync('git config user.name "TMDB Bot"');
+    execSync('git config user.email "actions@users.noreply.github.com"');
+    execSync(`git add ${HISTORIQUE_PATH}`);
+    execSync('git commit -m "Mise a jour historique TMDB"');
+    execSync("git push");
+    console.log("Historique mis à jour et poussé sur GitHub.");
+  } catch (err) {
+    console.error("Impossible de committer l'historique:", err.message);
+  }
+}
+
 function escapeHtml(str) {
   if (!str) return "";
   return str
@@ -106,12 +154,13 @@ async function handleTmdbLink(chatId, type, id) {
   const details = await fetchTMDB(type, id);
   if (!details || details.success === false) {
     await sendMessage(chatId, "❌ Impossible de récupérer cette fiche TMDB (lien invalide ou ID introuvable).");
-    return;
+    return false;
   }
 
   const isMovie = type === "movie";
   const typeEmoji = isMovie ? "🎬" : "📺";
-  const title = escapeHtml(isMovie ? details.title : details.name);
+  const rawTitle = isMovie ? details.title : details.name;
+  const title = escapeHtml(rawTitle);
   const years = isMovie
     ? formatYearsMovie(details.release_date)
     : formatYearsTv(details.first_air_date, details.last_air_date, details.status);
@@ -137,6 +186,9 @@ async function handleTmdbLink(chatId, type, id) {
     await sendPhoto(chatId, posterUrl, undefined);
   }
   await sendMessage(chatId, infoText);
+
+  appendHistorique(rawTitle, isMovie ? "Film" : "Série", tmdbUrl);
+  return true;
 }
 
 async function main() {
@@ -147,6 +199,8 @@ async function main() {
     console.log("Aucun nouveau message.");
     return;
   }
+
+  let historyUpdated = false;
 
   for (const update of updates) {
     const message = update.message;
@@ -159,7 +213,8 @@ async function main() {
       const [, type, id] = match;
       console.log(`Lien TMDB détecté: ${type}/${id} (chat ${chatId})`);
       try {
-        await handleTmdbLink(chatId, type, id);
+        const success = await handleTmdbLink(chatId, type, id);
+        if (success) historyUpdated = true;
       } catch (err) {
         console.error("Erreur lors du traitement du lien:", err);
         await sendMessage(chatId, "❌ Une erreur est survenue lors de la récupération des informations.");
@@ -171,6 +226,10 @@ async function main() {
   const lastUpdateId = updates[updates.length - 1].update_id;
   await getUpdates(lastUpdateId + 1);
   console.log(`${updates.length} message(s) traité(s).`);
+
+  if (historyUpdated) {
+    commitHistorique();
+  }
 }
 
 main().catch((err) => {
