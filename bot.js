@@ -57,6 +57,13 @@ async function sendPhoto(chatId, photoUrl, caption) {
   });
 }
 
+async function deleteMessage(chatId, messageId) {
+  return telegramCall("deleteMessage", {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+}
+
 async function fetchTMDB(type, id) {
   const url = `https://api.themoviedb.org/3/${type}/${id}?api_key=${TMDB_KEY}&language=fr-FR`;
   const res = await fetch(url);
@@ -177,7 +184,7 @@ async function handleTmdbLink(chatId, type, id) {
     `${typeEmoji} • <b>${title}</b>\n\n` +
     `🗓️ • ${years}\n\n` +
     `🕒 • ${duration}\n\n` +
-    `📜 • Résumé\n<i>${overview}</i>\n\n` +
+    `📜 • Résumé\n<tg-spoiler><i>${overview}</i></tg-spoiler>\n\n` +
     `🔗 • <a href="${tmdbUrl}">TMDB</a>`;
 
   if (posterPath) {
@@ -215,7 +222,10 @@ async function main() {
       console.log(`Lien TMDB détecté: ${type}/${id} (chat ${chatId})`);
       try {
         const success = await handleTmdbLink(chatId, type, id);
-        if (success) historyUpdated = true;
+        if (success) {
+          historyUpdated = true;
+          await deleteMessage(chatId, message.message_id);
+        }
       } catch (err) {
         console.error("Erreur lors du traitement du lien:", err);
         await sendMessage(chatId, "❌ Une erreur est survenue lors de la récupération des informations.");
