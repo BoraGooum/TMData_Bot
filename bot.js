@@ -10,6 +10,7 @@ const HISTORIQUE_HEADER = "Titre,Type,Lien TMDB (FR),Date et heure";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TMDB_KEY = process.env.TMDB_API_KEY;
+const MYMEMORY_EMAIL = process.env.MYMEMORY_EMAIL; // optionnel : augmente le quota gratuit MyMemory
 
 if (!TELEGRAM_TOKEN || !TMDB_KEY) {
   console.error("Variables d'environnement manquantes (TELEGRAM_BOT_TOKEN / TMDB_API_KEY).");
@@ -95,6 +96,61 @@ function pickTitle(details, isMovie) {
   if (enTranslation) return enTranslation.data[field];
 
   return isMovie ? details.original_title : details.original_name;
+}
+
+// Choisit le résumé : français si dispo, sinon anglais, sinon la langue originale.
+// Renvoie aussi si une traduction vers le français est nécessaire.
+function pickOverview(details) {
+  if (details.overview) return { text: details.overview, lang: "fr", needsTranslation: false };
+
+  const translations = details.translations?.translations || [];
+
+  const enT = translations.find((t) => t.iso_639_1 === "en" && t.data?.overview);
+  if (enT) return { text: enT.data.overview, lang: "en", needsTranslation: true };
+
+  const origT = translations.find((t) => t.iso_639_1 === details.original_language && t.data?.overview);
+  if (origT) return { text: origT.data.overview, lang: origT.iso_639_1, needsTranslation: true };
+
+  const anyT = translations.find((t) => t.data?.overview);
+  if (anyT) return { text: anyT.data.overview, lang: anyT.iso_639_1 || "en", needsTranslation: true };
+
+  return { text: null, lang: null, needsTranslation: false };
+}
+
+function splitIntoChunks(text, maxLen) {
+  const sentences = text.match(/[^.!?]+[.!?]+|\S+$/g) || [text];
+  const chunks = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (current && (current + sentence).length > maxLen) {
+      chunks.push(current.trim());
+      current = "";
+    }
+    current += sentence;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+// Traduit un texte vers le français via l'API gratuite MyMemory (sans clé).
+// Découpe en morceaux car l'API a une limite de longueur par requête.
+async function translateToFrench(text, sourceLang) {
+  const chunks = splitIntoChunks(text, 450);
+  const translated = [];
+
+  for (const chunk of chunks) {
+    const params = new URLSearchParams({
+      q: chunk,
+      langpair: `${sourceLang}|fr`,
+    });
+    if (MYMEMORY_EMAIL) params.set("de", MYMEMORY_EMAIL);
+
+    const res = await fetchWithRetry(`https://api.mymemory.translated.net/get?${params.toString()}`);
+    const data = await res.json();
+    translated.push(data?.responseData?.translatedText || chunk);
+  }
+
+  return translated.join(" ");
 }
 
 function yearFromDate(dateStr) {
@@ -209,7 +265,18 @@ async function handleTmdbLink(chatId, type, id) {
     ? formatDurationMovie(details.runtime)
     : formatDurationTv(details.number_of_seasons, details.number_of_episodes);
   const genres = formatGenres(details.genres);
-  const overview = escapeHtml(details.overview) || "Aucun résumé disponible.";
+
+  const overviewInfo = pickOverview(details);
+  let overviewRaw = overviewInfo.text;
+  if (overviewInfo.needsTranslation && overviewRaw) {
+    try {
+      overviewRaw = await translateToFrench(overviewRaw, overviewInfo.lang);
+    } catch (err) {
+      console.error("Erreur de traduction MyMemory:", err.message);
+      // En cas d'échec, on garde le texte dans sa langue d'origine plutôt que rien.
+    }
+  }
+  const overview = escapeHtml(overviewRaw) || "Aucun résumé disponible.";
   const posterPath = details.poster_path;
   // Le lien TMDB pointe toujours vers la version française de la fiche.
   const tmdbUrl = `https://www.themoviedb.org/${type}/${id}?language=fr-FR`;
