@@ -19,8 +19,20 @@ if (!TELEGRAM_TOKEN || !TMDB_KEY) {
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const TMDB_LINK_REGEX = /themoviedb\.org\/(movie|tv)\/(\d+)/i;
 
+async function fetchWithRetry(url, options, retries = 3, delayMs = 1000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      console.warn(`Tentative ${attempt}/${retries} échouée (${err.message}), nouvel essai dans ${delayMs}ms...`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function telegramCall(method, params) {
-  const res = await fetch(`${TELEGRAM_API}/${method}`, {
+  const res = await fetchWithRetry(`${TELEGRAM_API}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -65,10 +77,24 @@ async function deleteMessage(chatId, messageId) {
 }
 
 async function fetchTMDB(type, id) {
-  const url = `https://api.themoviedb.org/3/${type}/${id}?api_key=${TMDB_KEY}&language=fr-FR`;
-  const res = await fetch(url);
+  const url = `https://api.themoviedb.org/3/${type}/${id}?api_key=${TMDB_KEY}&language=fr-FR&append_to_response=translations`;
+  const res = await fetchWithRetry(url);
   if (!res.ok) return null;
   return res.json();
+}
+
+// Choisit le titre : français si dispo, sinon anglais, sinon titre original (VO).
+function pickTitle(details, isMovie) {
+  const field = isMovie ? "title" : "name";
+  const translations = details.translations?.translations || [];
+
+  const frTranslation = translations.find((t) => t.iso_639_1 === "fr" && t.data?.[field]);
+  if (frTranslation) return frTranslation.data[field];
+
+  const enTranslation = translations.find((t) => t.iso_639_1 === "en" && t.data?.[field]);
+  if (enTranslation) return enTranslation.data[field];
+
+  return isMovie ? details.original_title : details.original_name;
 }
 
 function yearFromDate(dateStr) {
@@ -106,6 +132,13 @@ function formatDurationTv(seasons, episodes) {
   const s = seasons ? `${seasons} saison${seasons > 1 ? "s" : ""}` : "saisons inconnues";
   const e = episodes ? `${episodes} épisode${episodes > 1 ? "s" : ""}` : "épisodes inconnus";
   return `${s}/${e}`;
+}
+
+function formatGenres(genres) {
+  if (!genres || genres.length === 0) return null;
+  const names = genres.slice(0, 2).map((g) => g.name);
+  if (names.length === 1) return names[0];
+  return `${names[0]} et ${names[1]}`;
 }
 
 function csvEscape(value) {
@@ -167,7 +200,7 @@ async function handleTmdbLink(chatId, type, id) {
 
   const isMovie = type === "movie";
   const typeEmoji = isMovie ? "🎬" : "📺";
-  const rawTitle = isMovie ? details.title : details.name;
+  const rawTitle = pickTitle(details, isMovie);
   const title = escapeHtml(rawTitle);
   const years = isMovie
     ? formatYearsMovie(details.release_date)
@@ -175,6 +208,7 @@ async function handleTmdbLink(chatId, type, id) {
   const duration = isMovie
     ? formatDurationMovie(details.runtime)
     : formatDurationTv(details.number_of_seasons, details.number_of_episodes);
+  const genres = formatGenres(details.genres);
   const overview = escapeHtml(details.overview) || "Aucun résumé disponible.";
   const posterPath = details.poster_path;
   // Le lien TMDB pointe toujours vers la version française de la fiche.
@@ -183,6 +217,7 @@ async function handleTmdbLink(chatId, type, id) {
   const infoText =
     `${typeEmoji} • <b>${title}</b>\n\n` +
     `🗓️ • ${years}\n\n` +
+    (genres ? `🎭 • ${escapeHtml(genres)}\n\n` : "") +
     `🕒 • ${duration}\n\n` +
     `📜 • Résumé\n<tg-spoiler><i>${overview}</i></tg-spoiler>\n\n` +
     `🔗 • <a href="${tmdbUrl}">TMDB</a>`;
